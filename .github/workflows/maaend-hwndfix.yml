@@ -56,9 +56,9 @@ jobs:
           if ((Get-FileHash -LiteralPath $patchPath -Algorithm SHA256).Hash.ToLowerInvariant() -ne $expectedPatch) {
             throw 'Patch checksum does not match the reviewed patch.'
           }
-          git apply --check --directory=build-source/MXU-2.5.3 -- $patchPath
+          git -c core.autocrlf=false apply --check --directory=build-source/MXU-2.5.3 -- $patchPath
           if ($LASTEXITCODE -ne 0) { throw 'Patch validation failed.' }
-          git apply --directory=build-source/MXU-2.5.3 -- $patchPath
+          git -c core.autocrlf=false apply --directory=build-source/MXU-2.5.3 -- $patchPath
           if ($LASTEXITCODE -ne 0) { throw 'Applying the patch failed.' }
 
       - name: Setup Node.js
