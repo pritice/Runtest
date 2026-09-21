@@ -1,0 +1,91 @@
+name: Build MaaEnd HWND fix for Windows
+
+on:
+  push:
+    branches:
+      - codex/maaend-hwndfix
+    paths:
+      - .github/workflows/maaend-hwndfix.yml
+      - maaend-hwndfix/**
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: maaend-hwndfix-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  windows:
+    runs-on: windows-2022
+    timeout-minutes: 120
+    env:
+      HUSKY: '0'
+      CARGO_INCREMENTAL: '0'
+      CARGO_PROFILE_DEV_DEBUG: '0'
+      CARGO_PROFILE_TEST_DEBUG: '0'
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - name: Checkout build recipe
+        uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: Download and verify official MXU v2.5.3 source
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $archivePath = Join-Path $env:GITHUB_WORKSPACE 'mxu-v2.5.3.zip'
+          Invoke-WebRequest -Uri 'https://codeload.github.com/MistEO/MXU/zip/refs/tags/v2.5.3' -OutFile $archivePath
+          $expected = 'f5f73fe076ddbe71639e24d6e1a4f89ae7b3aa9c5e5558cf71bdd802c27ec4df'
+          if ((Get-FileHash -LiteralPath $archivePath -Algorithm SHA256).Hash.ToLowerInvariant() -ne $expected) {
+            throw 'Official source archive SHA256 does not match the reviewed source.'
+          }
+          Expand-Archive -LiteralPath $archivePath -DestinationPath (Join-Path $env:GITHUB_WORKSPACE 'build-source')
+
+      - name: Apply reviewed HWND fix
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $patchPath = Join-Path $env:GITHUB_WORKSPACE 'maaend-hwndfix/MXU-2.5.3-hwndfix.1.patch'
+          git apply --check --directory=build-source/MXU-2.5.3 -- $patchPath
+          if ($LASTEXITCODE -ne 0) { throw 'Patch validation failed.' }
+          git apply --directory=build-source/MXU-2.5.3 -- $patchPath
+          if ($LASTEXITCODE -ne 0) { throw 'Applying the patch failed.' }
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: '22'
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v6
+        with:
+          version: '10.28.0'
+          run_install: false
+
+      - name: Setup Rust and formatting component
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+          components: rustfmt
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: build-source/MXU-2.5.3/src-tauri -> target
+          shared-key: maaend-hwndfix-windows-x86_64
+
+      - name: Test, build and package Windows executable
+        working-directory: build-source/MXU-2.5.3
+        run: ./Build-Windows-HwndFix.ps1
+
+      - name: Upload executable and corresponding source
+        uses: actions/upload-artifact@v6
+        with:
+          name: MaaEnd-MXU-2.5.3-hwndfix.1-win-x86_64
+          path: build-source/MXU-2.5.3/artifacts/MaaEnd-MXU-2.5.3-hwndfix.1-win-x86_64.zip
+          if-no-files-found: error
+          retention-days: 14
+          compression-level: 0

@@ -1,0 +1,298 @@
+--- a/src-tauri/src/commands/maa_core.rs
++++ b/src-tauri/src/commands/maa_core.rs
+@@ -41,6 +41,21 @@
+ 
+ fn next_synthetic_conn_id() -> i64 {
+     SYNTHETIC_CONN_ID.fetch_sub(1, Ordering::Relaxed)
++}
++
++/// Keep Windows HWNDs exact when serialized through JavaScript's Number type.
++/// Windows user-object handles have only 32 significant bits, but an HWND can
++/// arrive sign-extended on 64-bit Windows. Sending that u64 to JavaScript would
++/// lose low bits before the handle is passed back to the controller.
++fn desktop_window_handle_for_frontend(handle: u64) -> u64 {
++    #[cfg(windows)]
++    {
++        u64::from(handle as u32)
++    }
++    #[cfg(not(windows))]
++    {
++        handle
++    }
+ }
+ 
+ #[cfg(any(target_os = "macos", test))]
+@@ -599,7 +614,7 @@
+             }
+ 
+             result_windows.push(Win32Window {
+-                handle: w.hwnd as u64,
++                handle: desktop_window_handle_for_frontend(w.hwnd as u64),
+                 class_name: w.class_name,
+                 window_name: w.window_name,
+             });
+@@ -1091,6 +1106,58 @@
+ mod tests {
+     use super::{macos_maafw_version_supported, macos_system_version_supported, macos_window_id};
+ 
++    #[cfg(windows)]
++    #[test]
++    fn win32_window_handle_survives_javascript_number_round_trip() {
++        for native_handle in [
++            0xffff_ffff_8000_0001_u64,
++            0xffff_ffff_db88_1dae,
++            0xffff_ffff_ffff_fffe,
++        ] {
++            // Reproduce the old path: a sign-extended HWND loses bits as a Number.
++            assert_ne!(native_handle as f64 as u64, native_handle);
++
++            let window = super::Win32Window {
++                handle: super::desktop_window_handle_for_frontend(native_handle),
++                class_name: "UnityWndClass".to_string(),
++                window_name: "Endfield".to_string(),
++            };
++            let json = serde_json::to_value(&window).unwrap();
++            let returned_handle = json["handle"].as_f64().unwrap() as u64;
++            assert_eq!(returned_handle, native_handle & u64::from(u32::MAX));
++            assert_eq!(returned_handle, window.handle);
++        }
++    }
++
++    #[cfg(windows)]
++    #[test]
++    fn win32_window_handle_preserves_existing_u32_values() {
++        for handle in [
++            0_u64,
++            1,
++            1_447_842,
++            439_029_706,
++            0x7fff_ffff,
++            0x8000_0000,
++            0xffff_ffff,
++        ] {
++            assert_eq!(super::desktop_window_handle_for_frontend(handle), handle);
++        }
++    }
++
++    #[cfg(not(windows))]
++    #[test]
++    fn desktop_window_handle_preserves_non_windows_bits() {
++        for handle in [
++            0_u64,
++            u64::from(u32::MAX),
++            u64::from(u32::MAX) + 1,
++            u64::MAX,
++        ] {
++            assert_eq!(super::desktop_window_handle_for_frontend(handle), handle);
++        }
++    }
++
+     #[test]
+     fn macos_system_version_requires_14() {
+         assert_eq!(macos_system_version_supported("13.6.9"), Ok(false));
+--- a/package.json
++++ b/package.json
+@@ -1,7 +1,7 @@
+ {
+   "name": "mxu",
+   "private": true,
+-  "version": "0.1.0",
++  "version": "2.5.3-hwndfix.1",
+   "type": "module",
+   "scripts": {
+     "dev": "vite",
+--- a/src-tauri/Cargo.toml
++++ b/src-tauri/Cargo.toml
+@@ -1,6 +1,6 @@
+ [package]
+ name = "mxu"
+-version = "0.1.0"
++version = "2.5.3-hwndfix.1"
+ description = "A Tauri App"
+ authors = ["you"]
+ edition = "2021"
+--- a/src-tauri/Cargo.lock
++++ b/src-tauri/Cargo.lock
+@@ -3127,7 +3127,7 @@
+ 
+ [[package]]
+ name = "mxu"
+-version = "0.1.0"
++version = "2.5.3-hwndfix.1"
+ dependencies = [
+  "axum",
+  "base64 0.22.1",
+--- a/src-tauri/tauri.conf.json
++++ b/src-tauri/tauri.conf.json
+@@ -1,7 +1,7 @@
+ {
+   "$schema": "https://schema.tauri.app/config/2",
+   "productName": "mxu",
+-  "version": "0.1.0",
++  "version": "2.5.3-hwndfix.1",
+   "identifier": "com.misteo.mxu",
+   "build": {
+     "beforeDevCommand": "pnpm dev",
+--- /dev/null
++++ b/tests/hwnd-json-regression.test.mjs
+@@ -0,0 +1,33 @@
++import assert from 'node:assert/strict';
++import test from 'node:test';
++
++// Exercise the actual JavaScript/JSON boundary without external dependencies.
++// These supplement, but do not replace, the Rust tests in maa_core.rs.
++const signExtendedHandles = [
++  0xffff_ffff_8000_0001n,
++  0xffff_ffff_db88_1daen,
++  0xffff_ffff_ffff_fffen,
++];
++const low32Mask = 0xffff_ffffn;
++
++for (const nativeHandle of signExtendedHandles) {
++  test(`JSON preserves HWND ${nativeHandle.toString(16)} after backend normalization`, () => {
++    const oldWindow = JSON.parse(`{"handle":${nativeHandle},"class_name":"UnityWndClass","window_name":"Endfield"}`);
++    const oldRequest = JSON.parse(JSON.stringify({ type: 'Win32', handle: oldWindow.handle }));
++    assert.notEqual(BigInt(oldRequest.handle) & low32Mask, nativeHandle & low32Mask);
++
++    const normalizedHandle = nativeHandle & low32Mask;
++    const fixedWindow = JSON.parse(`{"handle":${normalizedHandle},"class_name":"UnityWndClass","window_name":"Endfield"}`);
++    const fixedRequest = JSON.parse(JSON.stringify({ type: 'Win32', handle: fixedWindow.handle }));
++    assert.equal(typeof fixedRequest.handle, 'number');
++    assert.ok(Number.isSafeInteger(fixedRequest.handle));
++    assert.equal(BigInt(fixedRequest.handle), normalizedHandle);
++  });
++}
++
++test('existing handles and the full unsigned 32-bit boundary remain exact', () => {
++  for (const handle of [0n, 1n, 1447842n, 439029706n, 0x7fff_ffffn, 0x8000_0000n, 0xffff_ffffn]) {
++    const request = JSON.parse(`{"handle":${handle & low32Mask}}`);
++    assert.equal(BigInt(request.handle), handle);
++  }
++});
+--- /dev/null
++++ b/Build-Windows-HwndFix.ps1
+@@ -0,0 +1,76 @@
++[CmdletBinding()]
++param()
++$ErrorActionPreference = 'Stop'
++$buildRoot = $PSScriptRoot
++$targetTriple = 'x86_64-pc-windows-msvc'
++$fixVersion = '2.5.3-hwndfix.1'
++
++function Invoke-Checked {
++    param([string]$Program, [string[]]$Arguments)
++    & $Program @Arguments
++    if ($LASTEXITCODE -ne 0) { throw "$Program failed with exit code $LASTEXITCODE." }
++}
++
++Push-Location $buildRoot
++try {
++    foreach ($program in @('node', 'pnpm', 'rustc', 'cargo')) {
++        if (-not (Get-Command $program -ErrorAction SilentlyContinue)) {
++            throw "Missing $program. See README-HWNDFIX.md. No executable has been built."
++        }
++    }
++    if ((node -p 'process.platform') -ne 'win32') { throw 'Run this script on Windows.' }
++    Invoke-Checked 'node' @('-e', 'const [major, minor] = process.versions.node.split(".").map(Number); if (!(major === 20 && minor >= 19 || major === 22 && minor >= 12 || major > 22)) { console.error("Node.js 20.19+ or 22.12+ is required."); process.exit(1); }')
++    if ((pnpm --version) -notmatch '^10\.28\.0$') { throw 'Use pnpm 10.28.0, as pinned in package.json.' }
++    Invoke-Checked 'node' @('--test', 'tests/hwnd-json-regression.test.mjs')
++    Invoke-Checked 'pnpm' @('install', '--frozen-lockfile')
++    Invoke-Checked 'cargo' @('fmt', '--manifest-path', 'src-tauri/Cargo.toml', '--', '--check')
++    Invoke-Checked 'pnpm' @('tauri', 'build', '--no-bundle', '--target', $targetTriple, '--', '--locked')
++    Invoke-Checked 'cargo' @('test', '--release', '--locked', '--manifest-path', 'src-tauri/Cargo.toml', '--target', $targetTriple, '--lib', 'window_handle')
++
++    $exe = Join-Path $buildRoot "src-tauri\target\$targetTriple\release\mxu.exe"
++    if (-not (Test-Path -LiteralPath $exe)) { throw 'Build finished without mxu.exe.' }
++    $packageName = "MaaEnd-MXU-$fixVersion-win-x86_64"
++    $artifactRoot = Join-Path $buildRoot 'artifacts'
++    $packageDir = Join-Path $artifactRoot $packageName
++    New-Item -ItemType Directory -Path $packageDir -Force | Out-Null
++    Copy-Item -LiteralPath $exe -Destination (Join-Path $packageDir 'MaaEnd.exe')
++    Copy-Item -LiteralPath 'LICENSE', 'README-HWNDFIX.md' -Destination $packageDir
++    $packageReadme = Join-Path $packageDir 'README-HWNDFIX.md'
++    $readmeText = Get-Content -LiteralPath $packageReadme -Raw -Encoding utf8
++    $readmeText = $readmeText -replace '(?s)## Status\r?\n.*?(?=## Fix)', "## Status`n`nThis package was produced after the JavaScript regressions, Rust formatting check, Windows x86_64 release build and Windows HWND Rust regressions completed successfully. The real game connection and screenshot smoke test has not been run on this binary. See BUILD-VALIDATION.json for the build record.`n`n"
++    Set-Content -LiteralPath $packageReadme -Value $readmeText -Encoding utf8
++    $sourceEntries = @('src', 'src-tauri', 'public', 'tests', 'package.json', 'pnpm-lock.yaml', 'index.html', 'vite.config.ts', 'tsconfig.json', 'tsconfig.node.json', 'Build-Windows-HwndFix.ps1', 'README-HWNDFIX.md', 'LICENSE')
++    # Exclude generated code, build outputs and dependencies from corresponding source.
++    $sourceStage = Join-Path $artifactRoot ('source-' + (Get-Date -Format 'yyyyMMddHHmmss'))
++    New-Item -ItemType Directory -Path $sourceStage -Force | Out-Null
++    foreach ($entry in $sourceEntries) {
++        if ($entry -eq 'src-tauri') {
++            New-Item -ItemType Directory -Path (Join-Path $sourceStage 'src-tauri') -Force | Out-Null
++            Get-ChildItem -LiteralPath 'src-tauri' -Force | Where-Object Name -notin @('target', 'gen') | Copy-Item -Destination (Join-Path $sourceStage 'src-tauri') -Recurse
++        } else { Copy-Item -LiteralPath $entry -Destination $sourceStage -Recurse }
++    }
++    Compress-Archive -Path (Join-Path $sourceStage '*') -DestinationPath (Join-Path $packageDir 'corresponding-source.zip') -Force
++    $hash = (Get-FileHash -LiteralPath (Join-Path $packageDir 'MaaEnd.exe') -Algorithm SHA256).Hash
++    "$hash  MaaEnd.exe" | Set-Content -LiteralPath (Join-Path $packageDir 'SHA256SUMS.txt') -Encoding ascii
++    $validation = [ordered]@{
++        version = $fixVersion
++        target = $targetTriple
++        built_at_utc = (Get-Date).ToUniversalTime().ToString('o')
++        javascript_regressions = 'passed'
++        rust_format = 'passed'
++        windows_release_build = 'passed'
++        windows_hwnd_rust_regressions = 'passed'
++        real_game_smoke_test = 'not_run'
++        executable_sha256 = $hash
++        rustc = (rustc --version)
++        node = (node --version)
++        pnpm = (pnpm --version)
++        github_run_id = $env:GITHUB_RUN_ID
++        github_commit = $env:GITHUB_SHA
++    }
++    $validation | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $packageDir 'BUILD-VALIDATION.json') -Encoding utf8
++    $packagePath = Join-Path $artifactRoot ($packageName + '.zip')
++    Compress-Archive -Path (Join-Path $packageDir '*') -DestinationPath $packagePath -Force
++    Write-Output "Built: $packagePath"
++    Write-Output 'Before installation, perform a real game connection and screenshot smoke test.'
++} finally { Pop-Location }
+--- /dev/null
++++ b/README-HWNDFIX.md
+@@ -0,0 +1,45 @@
++# MaaEnd / MXU HWND precision fix
++
++Unofficial patch based on the official MXU v2.5.3 source archive. Modified on 2026-09-21. Local version: `2.5.3-hwndfix.1`. Original license: AGPL-3.0, included in `LICENSE`.
++
++## Status
++
++The source fix and regression tests are present. **No patched executable has been built yet.** The available environment has no discovered Rust compiler or MSVC toolchain, and network permission blocks downloading build tools. JavaScript regression results are recorded in the accompanying validation report. Rust tests, rustfmt and the Windows release build must still run before this is considered a validated binary release.
++
++## Fix
++
++Some 64-bit Windows HWND values are sign-extended from 32 bits. Casting them directly to `u64` and serializing them as JSON numbers exceeds JavaScript's precise integer range. The frontend sends back a different HWND and MaaFramework reports `hwnd_ is invalid`.
++
++`desktop_window_handle_for_frontend` zero-extends the significant 32 bits on Windows before enumeration results are serialized or cached. Tauri IPC and the HTTP API share this path. Existing numeric frontend types remain compatible. Non-Windows handles are returned unchanged. The change does not modify game files, task configuration or scheduling.
++
++Sources:
++- https://github.com/MistEO/MXU/tree/v2.5.3
++- https://learn.microsoft.com/en-us/windows/win32/winprog64/interprocess-communication
++
++## Build on Windows x86_64
++
++Requirements: a Rust stable MSVC toolchain with the `x86_64-pc-windows-msvc` target; Visual Studio C++ Build Tools and Windows SDK; Node.js 20.19+ or 22.12+; pnpm **10.28.0**; access to the npm and Cargo dependency registries. Run from a developer PowerShell environment after installing prerequisites.
++
++```powershell
++.\Build-Windows-HwndFix.ps1
++```
++
++The script installs dependencies from lockfiles, checks Rust formatting, builds the frontend and Windows executable through Tauri, then runs HWND Rust regression tests before packaging. It stops at the first failure. On success, `artifacts/MaaEnd-MXU-2.5.3-hwndfix.1-win-x86_64.zip` contains `MaaEnd.exe`, checksums, documentation, license and corresponding source. This replaces only MaaEnd's MXU frontend executable; the original MaaEnd resources and MaaFramework DLLs remain required.
++
++JavaScript-only regression check, requiring no package installation:
++
++```powershell
++node --test tests/hwnd-json-regression.test.mjs
++```
++
++This check reproduces the JSON/Number bug and validates 32-bit normalization. It does not execute or compile the Rust implementation.
++
++## Installation and rollback, after a successful build
++
++1. Finish/stop MaaEnd tasks and close MaaEnd normally.
++2. Back up the existing `MaaEnd.exe` and the `config` directory.
++3. Replace only `MaaEnd.exe` with the successfully built file. Keep `maafw`, `resource`, `agent`, `interface.json` and configuration intact.
++4. Start the game through its normal launcher, start MaaEnd, re-scan the game window and test connection plus screenshots. Confirm the daily task configuration before starting tasks.
++5. To roll back, close MaaEnd and restore the original executable. Restore the backed-up configuration only if needed.
++
++An official MaaEnd update may replace this unofficial executable. Do not claim the underlying bug is fixed in an official release without checking that release.
