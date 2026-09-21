@@ -49,6 +49,13 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
           $patchPath = Join-Path $env:GITHUB_WORKSPACE 'maaend-hwndfix/MXU-2.5.3-hwndfix.1.patch'
+          # Git for Windows may check out patch files with CRLF, while the archive uses LF.
+          $patchText = Get-Content -LiteralPath $patchPath -Raw -Encoding utf8
+          [System.IO.File]::WriteAllText($patchPath, $patchText.Replace("`r`n", "`n"), [System.Text.UTF8Encoding]::new($false))
+          $expectedPatch = 'daeca8c972de48a09887f1c312a7dc52a4cfd09adbac439193d745576decc32e'
+          if ((Get-FileHash -LiteralPath $patchPath -Algorithm SHA256).Hash.ToLowerInvariant() -ne $expectedPatch) {
+            throw 'Patch checksum does not match the reviewed patch.'
+          }
           git apply --check --directory=build-source/MXU-2.5.3 -- $patchPath
           if ($LASTEXITCODE -ne 0) { throw 'Patch validation failed.' }
           git apply --directory=build-source/MXU-2.5.3 -- $patchPath
