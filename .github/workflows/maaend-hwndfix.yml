@@ -34,12 +34,12 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Download and verify official MXU v2.5.3 source
+      - name: Download and verify official MXU v2.6.1 source
         run: |
           $ErrorActionPreference = 'Stop'
-          $archivePath = Join-Path $env:GITHUB_WORKSPACE 'mxu-v2.5.3.zip'
-          Invoke-WebRequest -Uri 'https://codeload.github.com/MistEO/MXU/zip/refs/tags/v2.5.3' -OutFile $archivePath
-          $expected = 'f5f73fe076ddbe71639e24d6e1a4f89ae7b3aa9c5e5558cf71bdd802c27ec4df'
+          $archivePath = Join-Path $env:GITHUB_WORKSPACE 'mxu-v2.6.1.zip'
+          Invoke-WebRequest -Uri 'https://codeload.github.com/MistEO/MXU/zip/refs/tags/v2.6.1' -OutFile $archivePath
+          $expected = 'f9106d1df63f92dff6d8f203ba597977196463456fc570362afce63f0435671a'
           if ((Get-FileHash -LiteralPath $archivePath -Algorithm SHA256).Hash.ToLowerInvariant() -ne $expected) {
             throw 'Official source archive SHA256 does not match the reviewed source.'
           }
@@ -48,17 +48,17 @@ jobs:
       - name: Apply reviewed HWND fix
         run: |
           $ErrorActionPreference = 'Stop'
-          $patchPath = Join-Path $env:GITHUB_WORKSPACE 'maaend-hwndfix/MXU-2.5.3-hwndfix.1.patch'
+          $patchPath = Join-Path $env:GITHUB_WORKSPACE 'maaend-hwndfix/MXU-2.6.1-hwndfix.1.patch'
           # Git for Windows may check out patch files with CRLF, while the archive uses LF.
           $patchText = Get-Content -LiteralPath $patchPath -Raw -Encoding utf8
           [System.IO.File]::WriteAllText($patchPath, $patchText.Replace("`r`n", "`n"), [System.Text.UTF8Encoding]::new($false))
-          $expectedPatch = 'daeca8c972de48a09887f1c312a7dc52a4cfd09adbac439193d745576decc32e'
+          $expectedPatch = '3e205859542dd4d6d1d1301f6bf6aa33865f9710f5685f55b0d6ebdfc0de372b'
           if ((Get-FileHash -LiteralPath $patchPath -Algorithm SHA256).Hash.ToLowerInvariant() -ne $expectedPatch) {
             throw 'Patch checksum does not match the reviewed patch.'
           }
-          git -c core.autocrlf=false apply --check --directory=build-source/MXU-2.5.3 -- $patchPath
+          git -c core.autocrlf=false apply --check --directory=build-source/MXU-2.6.1 -- $patchPath
           if ($LASTEXITCODE -ne 0) { throw 'Patch validation failed.' }
-          git -c core.autocrlf=false apply --directory=build-source/MXU-2.5.3 -- $patchPath
+          git -c core.autocrlf=false apply --directory=build-source/MXU-2.6.1 -- $patchPath
           if ($LASTEXITCODE -ne 0) { throw 'Applying the patch failed.' }
 
       - name: Setup Node.js
@@ -81,18 +81,18 @@ jobs:
       - name: Cache Rust dependencies
         uses: Swatinem/rust-cache@v2
         with:
-          workspaces: build-source/MXU-2.5.3/src-tauri -> target
+          workspaces: build-source/MXU-2.6.1/src-tauri -> target
           shared-key: maaend-hwndfix-windows-x86_64
 
       - name: Test, build and package Windows executable
-        working-directory: build-source/MXU-2.5.3
+        working-directory: build-source/MXU-2.6.1
         run: ./Build-Windows-HwndFix.ps1
 
       - name: Upload executable and corresponding source
         uses: actions/upload-artifact@v6
         with:
-          name: MaaEnd-MXU-2.5.3-hwndfix.1-win-x86_64
-          path: build-source/MXU-2.5.3/artifacts/MaaEnd-MXU-2.5.3-hwndfix.1-win-x86_64.zip
+          name: MaaEnd-MXU-2.6.1-hwndfix.1-win-x86_64
+          path: build-source/MXU-2.6.1/artifacts/MaaEnd-MXU-2.6.1-hwndfix.1-win-x86_64.zip
           if-no-files-found: error
           retention-days: 14
           compression-level: 0
